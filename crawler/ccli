@@ -1,0 +1,123 @@
+#!/usr/bin/env ruby
+require "thor"
+require "sqlite3"
+require "uri"
+
+CRAWLER_DB="/tmp/crawler.db"
+
+class CrawlerCLI < Thor
+  def self.exit_on_failure?
+	  true
+	end
+
+  class_option :db_file,
+    :desc => "The location of the database file.",
+    :default => CRAWLER_DB, :type => :string
+
+  desc "init", "initializes crawler database."
+  option :force,
+    :desc => "Force overwrite database file, if one already exists",
+    :default => false, :type => :boolean, :aliases => :f
+  option :sdl_file,
+    :desc => "Location of SDL file used to initialize crawler database",
+    :default => nil
+  def init
+    if File::exists?(options[:db_file])
+      if options[:force]
+        say "Overwriting #{options[:db_file]}", Shell::Color::RED
+        system("rm -f #{options[:db_file]}")
+      else
+        say "#{options[:db_file]} already exists. Please remove it, or use the -f option, before continuing"
+        exit 1
+      end
+    end
+
+    sdl = options[:sdl_file] ||
+      File.join(Dir.pwd, File.dirname(__FILE__), "schema/create_crawler_database.sql")
+    system("sqlite3 #{options[:db_file]} < #{sdl}")
+
+    unless $?.success?
+      say "Database initialization failed:", Shell::Color::RED
+      raise $?.inspect
+    end
+
+    say "#{options[:db_file]} successfully initialized.\n" +
+      "You may want to add some manifest files (see 'add_manifests', 'seed' commands)."
+  end
+
+  desc "list_manifests", "lists manifests URLs in the crawler database"
+  def list_manifests
+    db = SQLite3::Database.new(options[:db_file])
+    i = 0
+    db.execute ("SELECT url FROM known_manifests") do |u|
+      say u[0]
+      i += 1
+    end
+    say "#{i} known manifest URLs"
+  end
+
+  desc "add_manifests", "adds manifest URLs"
+  option :manifests_file,
+    :desc => "If provided, reads manifest URLs from the provided file line by line"
+  option :force,
+    :desc => "Force insertion of new URLs despite ignoring validations",
+    :default => false, :type => :boolean, :aliases => :f
+  def add_manifests
+    manifests = []
+    i = 0
+    if options[:manifests_file].nil?
+      loop do
+        n = ask "Enter manifest URL. Empty input to terminate:"
+        break if n.empty?
+        manifests << n
+      end
+    else
+      manifests = File.read(options[:manifests_file]).split("\n")
+    end
+
+    added = insert_manifests(manifests, validate: !options[:force], say_errors: true)
+    say "Added #{added.count} manifest URLs."
+  end
+
+  desc "sql", "opens a sqlite3 console on the database"
+  def sql
+    exec("sqlite3 #{options[:db_file]}")
+  end
+
+  desc "seed", "seeds crawler database with test manifest files"
+  def seed
+    # Test manifest files can be found at
+    # https://docs.google.com/spreadsheets/d/1Fh0zwCjKYh4D-Mp1k5uxzINh6GG0yI1ezko49VaJV2c/edit#gid=0
+    test_manifest_urls = [
+      "https://raw.githubusercontent.com/smart-on-fhir/smart-scheduling-links/master/examples/$bulk-publish"
+    ]
+    added = insert_manifests(test_manifest_urls, validate: true, say_errors: true)
+    say "Added #{added.count} test manifest URLs."
+  end
+
+ private
+  # Inserts the list of provided manifest URLs. If validate is true, skips malformed manifest URLs.
+  # Returns a list of inserted manifests.
+  def insert_manifests(manifest_list, validate:, say_errors:)
+    db = SQLite3::Database.new(options[:db_file])
+
+    manifest_list.select do |m|
+      uri = URI::parse(m)
+      if validate and (uri.scheme&.empty? or
+        uri.host&.empty? or !uri.path&.end_with?("$bulk-publish"))
+        say "URL '#{m}' seems invalid (missing scheme, host, or does not end with '$bulk-publish'. Use -f to skip validations." if say_errors
+        next false
+      end
+
+      begin
+        db.execute("INSERT INTO known_manifests(url) VALUES (?)", [m])
+      rescue => e
+        say "Failed to add #{m}: #{e.inspect}" if say_errors
+        next false
+      end
+      true
+    end
+  end
+end
+
+CrawlerCLI.start(ARGV)

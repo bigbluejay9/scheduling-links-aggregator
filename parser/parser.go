@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,7 +16,7 @@ import (
 )
 
 var (
-	crawlerOutputFile = flag.String("crawler_output_file", "/tmp/crawler_output.VERSION.sqlite", "The output file produced by the crawler. Be sure to provide the desired VERSION of the output.")
+	crawlerOutputFile = flag.String("crawler_output_file", "", "The output file produced by the crawler. If empty, finds the latest crawler output matching '/tmp/crawler_output.*.sqlite'.")
 	output            = flag.String("output", "/tmp/parser_output.VERSION.sqlite", "The output file. 'VERSION' is replaced by the current unix epoch timestamp.")
 )
 
@@ -185,7 +187,7 @@ CREATE TABLE slot_extensions(
 
     -- value_integer will not be null if url is
     -- "http://fhir-registry.smarthealthit.org/StructureDefinition/slot-capacity"
-    value_integer TEXT,
+    value_integer INTEGER,
 
     slot_id NOT NULL
       REFERENCES slots(slot_id)
@@ -328,6 +330,228 @@ type SlotFile struct {
 	Extension    []SlotFileExtension `json:"extension"`
 }
 
+/* Serialization
+
+   Serialization routines assumes that the data is well formed.
+   Invalid data is silently dropped.
+*/
+
+/* Location File Serialization */
+// Serializes LocationFileTelecom and writes to the location_telecoms table.
+func (l *LocationFileTelecom) Write(db *sql.DB, locationId int64) error {
+	_, err := db.Exec(
+		"INSERT INTO location_telecoms (system, value, location_id) VALUES (?, ?, ?)",
+		l.System, l.Value, locationId)
+	return err
+}
+
+// Serializes LocationFileAddress and writes to the location_addresses table.
+func (l *LocationFileAddress) Write(db *sql.DB, locationId int64) error {
+	_, err := db.Exec(`
+      INSERT INTO location_addresses
+        (lines, city, state, postal_code, district, location_id)
+      VALUES (?, ?, ?, ?, ?, ?)`,
+		strings.Join(l.Line, ", "),
+		l.City, l.State, l.PostalCode, l.District, locationId)
+	return err
+}
+
+// Serializes LocationFilePosition and writes to the location_positions table.
+func (l *LocationFilePosition) Write(db *sql.DB, locationId int64) error {
+	_, err := db.Exec(
+		`INSERT INTO location_positions
+        (latitude, longitude, location_id)
+      VALUES (?, ?, ?)`,
+		l.Latitude, l.Longitude, locationId)
+	return err
+}
+
+// Serializes LocationFileIdentifier and writes to the location_identifiers table.
+func (l *LocationFileIdentifier) Write(db *sql.DB, locationId int64) error {
+	_, err := db.Exec(
+		`INSERT INTO location_identifiers
+        (system, value, location_id)
+      VALUES (?, ?, ?)`,
+		l.System, l.Value, locationId)
+	return err
+}
+
+// Serializes LocationFile and writes to the locations table.
+func (l *LocationFile) Write(db *sql.DB) error {
+	res, err := db.Exec(
+		"INSERT INTO locations (id, name, description) VALUES (?, ?, ?)",
+		l.Id, l.Name, l.Description)
+	if err != nil {
+		return err
+	}
+
+	locationId, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+
+	for _, v := range l.Telecom {
+		if err := v.Write(db, locationId); err != nil {
+			return err
+		}
+	}
+
+	if err := l.Address.Write(db, locationId); err != nil {
+		return err
+	}
+	if err := l.Position.Write(db, locationId); err != nil {
+		return err
+	}
+
+	for _, v := range l.Identifier {
+		if err := v.Write(db, locationId); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+/* Schedule File Serialization */
+
+// Serializes ScheduleFileExtension and writes to the schedule_extensions table.
+func (s *ScheduleFileExtension) Write(db *sql.DB, scheduleId int64) error {
+	if s.Url == "http://fhir-registry.smarthealthit.org/StructureDefinition/vaccine-dose" {
+		_, err := db.Exec(
+			`INSERT INTO schedule_extensions
+        (url, value_integer, schedule_id) VALUES (?, ?, ?)`,
+			s.Url, s.ValueInteger, scheduleId)
+		return err
+	} else if s.Url == "http://fhir-registry.smarthealthit.org/StructureDefinition/vaccine-product" {
+		_, err := db.Exec(
+			`INSERT INTO schedule_extensions
+        (url, system, code, display, schedule_id) VALUES (?, ?, ?, ?, ?)`,
+			s.Url, s.ValueCoding.System, s.ValueCoding.Code, s.ValueCoding.Display, scheduleId)
+		return err
+	} else {
+		log.Print("Ignoring invalid ScheduleFileExtension - unrecognized Url: %#v", s)
+		// Invalid Extension - do not write.
+		return nil
+	}
+}
+
+// Serializes ScheduleFileServiceType and writes to the schedule_service_types table.
+func (s *ScheduleFileServiceType) Write(db *sql.DB, scheduleId int64) error {
+	_, err := db.Exec(
+		`INSERT INTO schedule_service_types
+        (system, code, display, schedule_id)
+      VALUES (?, ?, ?, ?)`,
+		s.System, s.Code, s.Display, scheduleId)
+	return err
+}
+
+// Serializes ScheduleFile and writes to the schedules table.
+func (s *ScheduleFile) Write(db *sql.DB) error {
+	// Actor must be an array with a single object containing a JSON object with the
+	// field 'reference'.
+	if len(s.Actor) == 0 {
+		log.Print("Ignoring bad ScheduleFile - missing actor.reference: %#v", s)
+		return nil
+	}
+
+	res, err := db.Exec(
+		"INSERT INTO schedules (id, actor_reference) VALUES (?, ?)",
+		s.Id, s.Actor[0].Reference)
+	if err != nil {
+		return err
+	}
+
+	scheduleId, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+
+	for _, v := range s.ServiceType {
+		if err := v.Write(db, scheduleId); err != nil {
+			return err
+		}
+	}
+
+	for _, v := range s.Extension {
+		if err := v.Write(db, scheduleId); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+/* Slot File Serialization */
+
+const (
+	ISO8601TimeFormat = "2006-01-02T15:04:05Z0700"
+)
+
+// Serializes SlotFileExtension and writes to the slot_extensions table.
+func (s *SlotFileExtension) Write(db *sql.DB, slotId int64) error {
+	if s.Url == "http://fhir-registry.smarthealthit.org/StructureDefinition/booking-deep-link" {
+		_, err := db.Exec(
+			`INSERT INTO slot_extensions
+        (url, value_url, slot_id) VALUES (?, ?, ?)`,
+			s.Url, s.ValueUrl, slotId)
+		return err
+	} else if s.Url == "http://fhir-registry.smarthealthit.org/StructureDefinition/booking-phone" {
+		_, err := db.Exec(
+			`INSERT INTO slot_extensions
+        (url, value_string, slot_id) VALUES (?, ?, ?)`,
+			s.Url, s.ValueString, slotId)
+		return err
+	} else if s.Url == "http://fhir-registry.smarthealthit.org/StructureDefinition/slot-capacity" {
+		_, err := db.Exec(
+			`INSERT INTO slot_extensions
+        (url, value_integer, slot_id) VALUES (?, ?, ?)`,
+			s.Url, s.ValueInteger, slotId)
+		return err
+	} else {
+		// Invalid Extension - do not write.
+		log.Print("Ignoring invalid SlotFileExtension - unrecognized Url: %#v", s)
+		return nil
+	}
+}
+
+// Serializes SlotFile and writes to the slots table.
+func (s *SlotFile) Write(db *sql.DB) error {
+	start, err := time.Parse(ISO8601TimeFormat, s.Start)
+	if err != nil {
+		log.Print("Ignoring bad ISO8601 timestamp in SlotFile.Start: %#v", s)
+		start = time.Time{}
+	}
+
+	end, err := time.Parse(ISO8601TimeFormat, s.End)
+	if err != nil {
+		log.Print("Ignoring bad ISO8601 timestamp in SlotFile.End: %#v", s)
+		end = time.Time{}
+	}
+
+	res, err := db.Exec(`INSERT INTO
+      slots (id, schedule_reference, status, start_sec, end_sec)
+      VALUES (?, ?, ?, ?, ?)`,
+		s.Id, s.Schedule.Reference, s.Status, start.Unix(), end.Unix())
+	if err != nil {
+		return err
+	}
+
+	slotId, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+
+	for _, v := range s.Extension {
+		if err := v.Write(db, slotId); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+/* Program */
+
 // OpenOutput opens the specified outputFilename and loads schema into the file.
 // outputFilename must not exist.
 // Returns the opened database, the actual filename, and error.
@@ -356,89 +580,117 @@ func OpenOutput(outputFilenameTemplate, schema string) (*sql.DB, string, error) 
 	return odb, outputFilename, nil
 }
 
-// ParseLocations parses all rows in the locations table into LocationFiles.
-func ParseLocations(input *sql.DB) ([]LocationFile, error) {
-	var results []LocationFile
-	rows, err := input.Query("SELECT contents FROM locations")
+// ParseAndWriteLocations parses all rows in the locations table of input and writes
+// to the locations table of output.
+func ParseAndWriteLocations(input, output *sql.DB) error {
+	rows, err := input.Query("SELECT url, contents FROM locations")
 	if err != nil {
-		return []LocationFile{}, err
+		return err
 	}
 	defer rows.Close()
 
 	for rows.Next() {
-		var contents string
-		if err := rows.Scan(&contents); err != nil {
-			return []LocationFile{}, err
+		var url, contents string
+		if err := rows.Scan(&url, &contents); err != nil {
+			return err
 		}
 
+		log.Printf("Parsing location from %s.", url)
 		for _, c := range strings.Split(contents, "\n") {
 			var r LocationFile
 			if err := json.Unmarshal([]byte(c), &r); err != nil {
-				return []LocationFile{}, err
+				return err
 			}
-			results = append(results, r)
+			if err := r.Write(output); err != nil {
+				return err
+			}
 		}
 	}
 
-	return results, rows.Err()
+	return rows.Err()
 }
 
-// ParseSchedules parses all rows in the schedules table into ScheduleFiles.
-func ParseSchedules(input *sql.DB) ([]ScheduleFile, error) {
-	var results []ScheduleFile
-	rows, err := input.Query("SELECT contents FROM schedules")
+// ParseAndWriteSchedules parses all rows in the schedules table of input and writes
+// to the schedules table of output.
+func ParseAndWriteSchedules(input, output *sql.DB) error {
+	rows, err := input.Query("SELECT url, contents FROM schedules")
 	if err != nil {
-		return []ScheduleFile{}, err
+		return err
 	}
 	defer rows.Close()
 
 	for rows.Next() {
-		var contents string
-		if err := rows.Scan(&contents); err != nil {
-			return []ScheduleFile{}, err
+		var url, contents string
+		if err := rows.Scan(&url, &contents); err != nil {
+			return err
 		}
 
+		log.Printf("Parsing schedule from %s.", url)
 		for _, c := range strings.Split(contents, "\n") {
 			var r ScheduleFile
 			if err := json.Unmarshal([]byte(c), &r); err != nil {
-				return []ScheduleFile{}, nil
+				return err
 			}
-			results = append(results, r)
+			if err := r.Write(output); err != nil {
+				return err
+			}
 		}
 	}
 
-	return results, rows.Err()
+	return rows.Err()
 }
 
-// ParseSlots parses all rows in the slots table into SlotFiles.
-func ParseSlots(input *sql.DB) ([]SlotFile, error) {
-	var results []SlotFile
-	rows, err := input.Query("SELECT contents FROM schedules")
+// ParseAndWriteSlots parses all rows in the slots table of input and writes
+// to the slots table of output.
+func ParseAndWriteSlots(input, output *sql.DB) error {
+	rows, err := input.Query("SELECT url, contents FROM slots")
 	if err != nil {
-		return []SlotFile{}, err
+		return err
 	}
 	defer rows.Close()
 
 	for rows.Next() {
-		var contents string
+		var url, contents string
 		if err := rows.Scan(&contents); err != nil {
-			return []SlotFile{}, err
+			return err
 		}
 
+		log.Printf("Parsing slot from %s.", url)
 		for _, c := range strings.Split(contents, "\n") {
 			var r SlotFile
 			if err := json.Unmarshal([]byte(c), &r); err != nil {
-				return []SlotFile{}, err
+				return err
 			}
-			results = append(results, r)
+			if err := r.Write(output); err != nil {
+				return err
+			}
 		}
 	}
 
-	return results, rows.Err()
+	return rows.Err()
 }
 
 func Run() error {
-	crawlerOutput, err := sql.Open("sqlite3", *crawlerOutputFile)
+	inputFile := *crawlerOutputFile
+	if inputFile == "" {
+		pattern := "/tmp/crawler_output.*.sqlite"
+		files, err := filepath.Glob(pattern)
+		if err != nil {
+			return fmt.Errorf("cannot find crawler output file matching '%s': %s", pattern, err)
+		}
+		if len(files) == 0 {
+			return fmt.Errorf("cannot find crawler output file matching '%s': did you run the crawler?", pattern)
+		}
+		sort.Strings(files)
+		inputFile = files[len(files)-1]
+	} else {
+		_, err := os.Stat(inputFile)
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%s does not exist", inputFile)
+		}
+	}
+
+	crawlerOutput, err := sql.Open("sqlite3", inputFile)
 	if err != nil {
 		return err
 	}
@@ -450,25 +702,27 @@ func Run() error {
 	}
 	defer odb.Close()
 
-	parseStart := time.Now()
-	locations, err := ParseLocations(crawlerOutput)
+	start := time.Now()
+	log.Print("Parsing locations")
+	err = ParseAndWriteLocations(crawlerOutput, odb)
 	if err != nil {
 		return err
 	}
 
-	schedules, err := ParseSchedules(crawlerOutput)
+	log.Print("Parsing schedules")
+	err = ParseAndWriteSchedules(crawlerOutput, odb)
 	if err != nil {
 		return err
 	}
 
-	slots, err := ParseSlots(crawlerOutput)
+	log.Print("Parsing slots")
+	err = ParseAndWriteSlots(crawlerOutput, odb)
 	if err != nil {
 		return err
 	}
 
-	log.Printf("Parsed %d locations, %d schedules, %d slots in %s",
-		len(locations), len(schedules), len(slots),
-		time.Since(parseStart).String())
+	log.Printf("Parsed and wrote in %s",
+		time.Since(start).String())
 	log.Printf("Wrote output to %s.", outputFilename)
 
 	return nil

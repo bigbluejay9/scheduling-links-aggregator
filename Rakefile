@@ -1,3 +1,11 @@
+def latest_crawler_output()
+  Dir.glob("/tmp/crawler_output.*.sqlite").sort.last
+end
+
+def latest_parser_output()
+  Dir.glob("/tmp/parser_output.*.sqlite").sort.last
+end
+
 desc "Builds crawler and parser binaries."
 task :build do |t|
   Dir.chdir("crawler") {
@@ -15,7 +23,20 @@ end
 
 desc "Removes built binaries and build artifacts."
 task :clean do |t|
-  rm_r "bin/"
+  rm_rf "bin/"
+  rm_f ["crawler/crawler", "parser/parser"]
+end
+
+desc "Prints the latest crawler and parser outputs"
+task :output do |t|
+  puts "Latest crawler output: #{latest_crawler_output}"
+  puts "Latest parser output: #{latest_parser_output}"
+end
+
+desc "Removes all crawler and parser outputs except for the latest one"
+task :clean_stale_output do |t|
+  rm Dir.glob("/tmp/crawler_output.*.sqlite").sort.reject { |s| s == latest_crawler_output }
+  rm Dir.glob("/tmp/parser_output.*.sqlite").sort.reject { |s| s == latest_parser_output }
 end
 
 desc "Removes crawler and parser outputs."

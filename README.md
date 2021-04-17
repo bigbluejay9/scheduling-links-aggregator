@@ -14,11 +14,26 @@ https://github.com/smart-on-fhir/smart-scheduling-links. There are two main comp
 - Parser: given the output of the crawler, the parser parses the JSON files and writes the output to a SQLite database
   file specified the `--output` flag. The output file's schema can be found [here](parser/parser.go#L21).
 
-It is the intended for these files to be published (e.g. via S3 equvialent service) so that front ends can read and
+It is intended for these files to be published (e.g. via S3 or equivalent service) so that front ends can read and
 display vaccination data to end users. For frontend clients that prefer raw JSON, the output of the crawler is
 appropriate. For frontend clients that prefer structured data, the output of the parser is appropriate.
 
 ## Usage
+
+Build binaries
+```sh
+$ rake
+```
+
+Create a seed `manifest_files` used for testing and development
+```sh
+$ rake seed
+```
+
+Run crawler
+```sh
+$ rake && bin/crawler --manifest_urls=bin/manifest_urls
+```
 
 ### Crawler
 

@@ -3,8 +3,8 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+  "fmt"
 	"flag"
-	"io/ioutil"
 	"log"
 	"os"
 	"strings"
@@ -14,11 +14,184 @@ import (
 )
 
 var (
-	crawlerOutputFile = flag.String("crawler_output_file", "crawler_output.db", "The output file produced by the crawler.")
-
-	outputSchema = flag.String("output_schema_file", "schema/create_parsed_database.sql", "The output file schema.")
-	output       = flag.String("output", "output.db", "The output file.")
+	crawlerOutputFile = flag.String("crawler_output_file", "/tmp/crawler_output.VERSION.sqlite", "The output file produced by the crawler. Be sure to provide the desired VERSION of the output.")
+	output       = flag.String("output", "/tmp/parser_output.VERSION.sqlite", "The output file. 'VERSION' is replaced by the current unix epoch timestamp.")
 )
+
+// OutputSchema is the schema for the sqlite database written into the output file.
+var OutputSchema = `
+PRAGMA encoding = "UTF-8";
+PRAGMA foreign_keys = ON;
+
+-- Location, Schedule, and Slot file as SQL tables.
+-- JSON definitions:
+-- Location: https://github.com/smart-on-fhir/smart-scheduling-links/blob/master/specification.md#location-file
+-- Schedule: https://github.com/smart-on-fhir/smart-scheduling-links/blob/master/specification.md#schedule-file
+-- Slot: https://github.com/smart-on-fhir/smart-scheduling-links/blob/master/specification.md#slot-file
+--
+-- In general, fields are renamed from camelCase to snake_case.
+-- Arrays fields are stored in a FILE-TYPE_FIELD table, and joined using the FILE-TYPE's primary key.
+-- E.g. the array of telecom JSON objects in Location is stored in location_telecoms and joined on location_id.
+
+-- A Location object.
+-- https://github.com/smart-on-fhir/smart-scheduling-links/blob/master/specification.md#location-file
+CREATE TABLE locations(
+    location_id INTEGER PRIMARY KEY,
+
+    -- Note that since we aggregate data from multiple publishers, id
+    -- is not guaranteed to be unique like the spec says.
+    id TEXT NOT NULL,
+    name TEXT NOT NULL,
+
+    description TEXT NOT NULL
+);
+
+-- Location.telecom object.
+CREATE TABLE location_telecoms(
+    location_telecom_id INTEGER PRIMARY KEY,
+
+    system TEXT NOT NULL,
+    value TEXT NOT NULL,
+
+    location_id NOT NULL
+      REFERENCES locations(location_id)
+        ON DELETE CASCADE
+);
+
+-- Location.address object.
+CREATE TABLE location_addresses(
+    location_address_id INTEGER PRIMARY KEY,
+
+    -- ", " joined strings of the 'Location.address.line' JSON array.
+    lines TEXT NOT NULL,
+
+    city TEXT NOT NULL,
+    state TEXT NOT NULL,
+    postal_code TEXT NOT NULL,
+    district TEXT NOT NULL,
+
+    location_id NOT NULL
+      REFERENCES locations(location_id)
+        ON DELETE CASCADE
+);
+
+-- Location.position object.
+CREATE TABLE location_positions(
+    location_position_id INTEGER PRIMARY KEY,
+
+    latitude REAL NOT NULL,
+    longitude REAL NOT NULL,
+
+    location_id NOT NULL
+      REFERENCES locations(location_id)
+        ON DELETE CASCADE
+);
+
+-- Location.identifier object.
+CREATE TABLE location_identifiers(
+    location_identifier_id INTEGER PRIMARY KEY,
+
+    system TEXT NOT NULL,
+    value TEXT NOT NULL,
+
+    location_id NOT NULL
+      REFERENCES locations(location_id)
+        ON DELETE CASCADE
+);
+
+-- A Schedule object.
+-- https://github.com/smart-on-fhir/smart-scheduling-links/blob/master/specification.md#schedule-file
+CREATE TABLE schedules(
+    schedule_id INTEGER PRIMARY KEY,
+
+    -- Note that since we aggregate data from multiple publishers, id
+    -- is not guaranteed to be unique like the spec says.
+    id TEXT NOT NULL,
+
+    -- Although actor is a JSON array. It can only have one object with a string "reference" field.
+    -- We put the reference string here directly instead of another child table.
+    actor_reference TEXT NOT NULL
+);
+
+-- Schedule.serviceType object.
+CREATE TABLE schedule_service_types(
+    schedule_service_type_id INTEGER PRIMARY KEY,
+
+    system TEXT NOT NULL,
+    code TEXT NOT NULL,
+    display TEXT NOT NULL,
+
+    schedule_id NOT NULL
+      REFERENCES schedules(schedule_id)
+        ON DELETE CASCADE
+);
+
+-- Schedule.extension object.
+CREATE TABLE schedule_extensions(
+    schedule_extension_id INTEGER PRIMARY KEY,
+
+    url TEXT NOT NULL,
+
+    -- value_integer will not be null if url is
+    -- "http://fhir-registry.smarthealthit.org/StructureDefinition/vaccine-dose"
+    value_integer INTEGER,
+
+    -- system, code, and display will not be null if url is
+    -- "http://fhir-registry.smarthealthit.org/StructureDefinition/vaccine-product"
+    system TEXT,
+    code TEXT,
+    display TEXT,
+
+    schedule_id NOT NULL
+      REFERENCES schedules(schedule_id)
+        ON DELETE CASCADE
+);
+
+-- A Slot object.
+-- https://github.com/smart-on-fhir/smart-scheduling-links/blob/master/specification.md#slot-file
+CREATE TABLE slots(
+    slot_id INTEGER PRIMARY KEY,
+
+    -- Note that since we aggregate data from multiple publishers, id
+    -- is not guaranteed to be unique like the spec says.
+    id TEXT NOT NULL,
+
+    -- Although schedule is a JSON object, it can only have one string "reference" field.
+    -- We put the reference string here directly instead of another child table.
+    schedule_reference TEXT NOT NULL,
+
+    status TEXT NOT NULL,
+
+    -- 'start' field as seconds since Unix epoch.
+    start_sec INTEGER NOT NULL,
+
+    -- 'end' field as seconds since Unix epoch.
+    end_sec INTEGER NOT NULL
+);
+
+-- Slot.extension object.
+CREATE TABLE slot_extensions(
+    slot_extension_id INTEGER PRIMARY KEY,
+
+    url TEXT NOT NULL,
+
+    -- value_url will not be null if url is
+    -- "http://fhir-registry.smarthealthit.org/StructureDefinition/booking-deep-link"
+    value_url TEXT,
+
+    -- value_string will not be null if url is
+    -- "http://fhir-registry.smarthealthit.org/StructureDefinition/booking-phone"
+    value_string TEXT,
+
+    -- value_integer will not be null if url is
+    -- "http://fhir-registry.smarthealthit.org/StructureDefinition/slot-capacity"
+    value_integer TEXT,
+
+    slot_id NOT NULL
+      REFERENCES slots(slot_id)
+        ON DELETE CASCADE
+);
+`
 
 /* File Object Models */
 /* As defined https://github.com/smart-on-fhir/smart-scheduling-links/blob/master/specification.md */
@@ -155,10 +328,12 @@ type SlotFile struct {
 	Extension    []SlotFileExtension `json:"extension"`
 }
 
-// OpenOutput opens the specified outputFilename and loads outputSchema into the file.
+// OpenOutput opens the specified outputFilename and loads schema into the file.
 // outputFilename must not exist.
-// outputSchema must be a file containing DDL to set up the output file schema.
-func OpenOutput(outputFilename, outputSchema string) (*sql.DB, error) {
+func OpenOutput(outputFilenameTemplate, schema string) (*sql.DB, error) {
+  outputFilename := strings.ReplaceAll(
+                      outputFilenameTemplate, "VERSION", fmt.Sprintf("%d", time.Now().Unix()))
+
 	_ = os.Remove(outputFilename)
 	outputFile, err := os.Create(outputFilename)
 	if err != nil {
@@ -166,23 +341,21 @@ func OpenOutput(outputFilename, outputSchema string) (*sql.DB, error) {
 	}
 	outputFile.Close()
 
-	os, err := ioutil.ReadFile(outputSchema)
-	if err != nil {
-		return nil, err
-	}
-	odb, err := sql.Open("sqlite3", *output)
+	odb, err := sql.Open("sqlite3", outputFilename)
 	if err != nil {
 		return nil, err
 	}
 
-	_, err = odb.Exec(string(os))
+	_, err = odb.Exec(schema)
 	if err != nil {
+    odb.Close()
 		return nil, err
 	}
 
 	return odb, nil
 }
 
+// ParseLocations parses all rows in the locations table into LocationFiles.
 func ParseLocations(input *sql.DB) ([]LocationFile, error) {
 	var results []LocationFile
 	rows, err := input.Query("SELECT contents FROM locations")
@@ -209,6 +382,7 @@ func ParseLocations(input *sql.DB) ([]LocationFile, error) {
 	return results, rows.Err()
 }
 
+// ParseSchedules parses all rows in the schedules table into ScheduleFiles.
 func ParseSchedules(input *sql.DB) ([]ScheduleFile, error) {
 	var results []ScheduleFile
 	rows, err := input.Query("SELECT contents FROM schedules")
@@ -235,6 +409,7 @@ func ParseSchedules(input *sql.DB) ([]ScheduleFile, error) {
 	return results, rows.Err()
 }
 
+// ParseSlots parses all rows in the slots table into SlotFiles.
 func ParseSlots(input *sql.DB) ([]SlotFile, error) {
 	var results []SlotFile
 	rows, err := input.Query("SELECT contents FROM schedules")
@@ -268,7 +443,7 @@ func Run() error {
 	}
 	defer crawlerOutput.Close()
 
-	odb, err := OpenOutput(*output, *outputSchema)
+	odb, err := OpenOutput(*output, OutputSchema)
 	if err != nil {
 		return err
 	}

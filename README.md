@@ -19,3 +19,11 @@ display vaccination data to end users. For frontend clients that prefer raw JSON
 appropriate. For frontend clients that prefer structured data, the output of the parser is appropriate.
 
 ## Usage
+
+### Crawler
+
+**Please do NOT use the Crawler without a caching proxy!**
+
+The crawler issues GET requests to the specified manifest URLs, and any resources those manifest files name.
+It is imperative to put a caching HTTP(s) proxy in front of the crawler in order to cache requests between multiple
+crawler invocations.

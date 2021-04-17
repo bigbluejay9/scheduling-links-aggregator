@@ -330,29 +330,30 @@ type SlotFile struct {
 
 // OpenOutput opens the specified outputFilename and loads schema into the file.
 // outputFilename must not exist.
-func OpenOutput(outputFilenameTemplate, schema string) (*sql.DB, error) {
+// Returns the opened database, the actual filename, and error.
+func OpenOutput(outputFilenameTemplate, schema string) (*sql.DB, string, error) {
   outputFilename := strings.ReplaceAll(
                       outputFilenameTemplate, "VERSION", fmt.Sprintf("%d", time.Now().Unix()))
 
 	_ = os.Remove(outputFilename)
 	outputFile, err := os.Create(outputFilename)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	outputFile.Close()
 
 	odb, err := sql.Open("sqlite3", outputFilename)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	_, err = odb.Exec(schema)
 	if err != nil {
     odb.Close()
-		return nil, err
+		return nil, "", err
 	}
 
-	return odb, nil
+	return odb, outputFilename, nil
 }
 
 // ParseLocations parses all rows in the locations table into LocationFiles.
@@ -443,7 +444,7 @@ func Run() error {
 	}
 	defer crawlerOutput.Close()
 
-	odb, err := OpenOutput(*output, OutputSchema)
+	odb, outputFilename, err := OpenOutput(*output, OutputSchema)
 	if err != nil {
 		return err
 	}
@@ -468,7 +469,7 @@ func Run() error {
 	log.Printf("Parsed %d locations, %d schedules, %d slots in %s",
 		len(locations), len(schedules), len(slots),
 		time.Since(parseStart).String())
-	log.Printf("Wrote output to %s.", *output)
+	log.Printf("Wrote output to %s.", outputFilename)
 
 	return nil
 }

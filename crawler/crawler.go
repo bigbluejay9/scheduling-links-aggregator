@@ -2,6 +2,8 @@ package main
 
 import (
 	"database/sql"
+  "sync"
+  "net/url"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -280,39 +282,126 @@ type ManifestFile struct {
 	Output          []ManifestFileOutput `json:"output"`
 }
 
+// CrawlStats tracks statistics about the crawler.
+// Thread safe.
+type CrawlStats struct {
+  // Maps fileType (manifest, location, etc...) -> count.
+  fileTypeToCount map[string]int
+
+  // Maps host -> count.
+  hostToCount map[string]int
+
+  // Records when the crawling started/ended.
+  startTime time.Time
+  endTime time.Time
+
+  // Guards all fields.
+  mu sync.Mutex
+}
+
+// Record that the crawling started.
+func (c* CrawlStats) CrawlStart() {
+  c.mu.Lock()
+  defer c.mu.Unlock()
+  c.startTime = time.Now()
+}
+
+// Record that the crawling ended.
+func (c* CrawlStats) CrawlEnd() {
+  c.mu.Lock()
+  defer c.mu.Unlock()
+  c.endTime = time.Now()
+}
+
+// Record an instance of crawling url with fileType.
+func (c *CrawlStats) Record(u, fileType string) {
+  c.mu.Lock()
+  defer c.mu.Unlock()
+
+  if c.fileTypeToCount == nil {
+    c.fileTypeToCount = make(map[string]int)
+  }
+
+  key := strings.ToLower(fileType)
+  count := c.fileTypeToCount[key]
+  c.fileTypeToCount[key] = count + 1
+
+  ur, err := url.Parse(u)
+  // Skip recording malformed URLs.
+  if err != nil {
+    return
+  }
+
+  if c.hostToCount == nil {
+    c.hostToCount = make(map[string]int)
+  }
+
+  hostKey := ur.Host
+  count = c.hostToCount[hostKey]
+  c.hostToCount[hostKey] = count + 1
+}
+
+// Returns pretty printed stats.
+func (c *CrawlStats) String() string {
+  c.mu.Lock()
+  defer c.mu.Unlock()
+
+  o := "\n\n\n"
+
+  o += fmt.Sprintf("Crawling took %s.\n\n", c.endTime.Sub(c.startTime))
+  o += "Crawled resources by type:\n"
+  for k, v := range c.fileTypeToCount {
+    if k == "slot" {
+    o += fmt.Sprintf("%s:\t\t%d\n", k, v)
+    } else {
+    o += fmt.Sprintf("%s:\t%d\n", k, v)
+    }
+  }
+
+  o += "\nCrawled resources by host:\n"
+  for k, v := range c.hostToCount {
+    o += fmt.Sprintf("%s:\t%d\n", k, v)
+  }
+  o += "\n\n"
+  return o
+}
+
 // FetchFn is an interface for a function that takes a url and returns the
 // url's contents or an error.
 type FetcherFn func(url string) (string, error)
 
 // OpenOutput opens the specified outputFilename and loads schema into the file.
 // outputFilename must not exist.
-func OpenOutput(outputFilenameTemplate, schema string) (*sql.DB, error) {
+// Returns the opened database, the actual filename, and error.
+func OpenOutput(outputFilenameTemplate, schema string) (*sql.DB, string, error) {
   outputFilename := strings.ReplaceAll(
                       outputFilenameTemplate, "VERSION", fmt.Sprintf("%d", time.Now().Unix()))
 
 	_ = os.Remove(outputFilename)
 	outputFile, err := os.Create(outputFilename)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	outputFile.Close()
 
 	odb, err := sql.Open("sqlite3", outputFilename)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	_, err = odb.Exec(schema)
 	if err != nil {
     odb.Close()
-		return nil, err
+		return nil, "", err
 	}
 
-	return odb, nil
+	return odb, outputFilename, nil
 }
 
 // CrawlManifest crawls the specified manifestUrl and writes the crawl results into output.
-func CrawlManifest(manifestUrl string, output *sql.DB, fetchFn FetcherFn) error {
+func CrawlManifest(manifestUrl string, output *sql.DB, fetchFn FetcherFn, stats *CrawlStats) error {
+  log.Printf("Crawling Manifest file: %s.", manifestUrl)
+  stats.Record(manifestUrl, "manifest")
 	manifestBody, err := fetchFn(manifestUrl)
 	if err != nil {
 		return err
@@ -345,6 +434,7 @@ func CrawlManifest(manifestUrl string, output *sql.DB, fetchFn FetcherFn) error 
 				StateJoinTableFK: "location_id",
 				Fetcher:          fetchFn,
 				Output:           output,
+        Stats: stats,
 			}); err != nil {
 				log.Printf("Unable to crawl location file %s: %s", o.Url, err)
 			}
@@ -357,6 +447,7 @@ func CrawlManifest(manifestUrl string, output *sql.DB, fetchFn FetcherFn) error 
 				StateJoinTableFK: "schedule_id",
 				Fetcher:          fetchFn,
 				Output:           output,
+        Stats: stats,
 			}); err != nil {
 				log.Printf("Unable to crawl schedule file %s: %s", o.Url, err)
 			}
@@ -369,6 +460,7 @@ func CrawlManifest(manifestUrl string, output *sql.DB, fetchFn FetcherFn) error 
 				StateJoinTableFK: "slot_id",
 				Fetcher:          fetchFn,
 				Output:           output,
+        Stats: stats,
 			}); err != nil {
 				log.Printf("Unable to crawl slot file %s: %s", o.Url, err)
 			}
@@ -402,10 +494,15 @@ type CrawlLeafFileOptions struct {
 
 	// Output file to write crawl results to.
 	Output *sql.DB
+
+  // Stats - CrawlStats.Record(FileInfo.FileType) will be called.
+  Stats *CrawlStats
 }
 
 // CrawlLeafFile crawls a non-manifest file with the given options.
 func CrawlLeafFile(opts *CrawlLeafFileOptions) error {
+  log.Printf("Crawling %s file: %s.", opts.FileInfo.FileType, opts.FileInfo.Url)
+  opts.Stats.Record(opts.FileInfo.Url, opts.FileInfo.FileType)
 	body, err := opts.Fetcher(opts.FileInfo.Url)
 	if err != nil {
 		return err
@@ -457,13 +554,14 @@ func LoadManifestUrls(manifestFile string) ([]string, error) {
 }
 
 func Run() error {
+  var stats CrawlStats
   log.Printf("Loading manifest urls from %s.", *manifestUrls)
 	urls, err := LoadManifestUrls(*manifestUrls)
 	if err != nil {
 		return err
 	}
 
-	odb, err := OpenOutput(*output, OutputSchema)
+	odb, outputFilename, err := OpenOutput(*output, OutputSchema)
 	if err != nil {
 		return err
 	}
@@ -482,16 +580,16 @@ func Run() error {
     return bodyBuffer.String(), nil
   }
 
-	crawlStart := time.Now()
+  stats.CrawlStart()
 	log.Printf("Crawling %d manifests.", len(urls))
 	for _, url := range urls {
-		if err := CrawlManifest(url, odb, fetchFn); err != nil {
+		if err := CrawlManifest(url, odb, fetchFn, &stats); err != nil {
 			log.Printf("Failed to crawl manifest %s: %s.", url, err)
 		}
 	}
-
-	log.Printf("Crawling %d manifests took %s.", len(urls), time.Since(crawlStart).String())
-	log.Printf("Output written to %s.", *output)
+  stats.CrawlEnd()
+  log.Print(stats.String())
+	log.Printf("Output written to %s.", outputFilename)
 
   return nil
 }

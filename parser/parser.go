@@ -3,8 +3,8 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
-  "fmt"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -15,7 +15,7 @@ import (
 
 var (
 	crawlerOutputFile = flag.String("crawler_output_file", "/tmp/crawler_output.VERSION.sqlite", "The output file produced by the crawler. Be sure to provide the desired VERSION of the output.")
-	output       = flag.String("output", "/tmp/parser_output.VERSION.sqlite", "The output file. 'VERSION' is replaced by the current unix epoch timestamp.")
+	output            = flag.String("output", "/tmp/parser_output.VERSION.sqlite", "The output file. 'VERSION' is replaced by the current unix epoch timestamp.")
 )
 
 // OutputSchema is the schema for the sqlite database written into the output file.
@@ -332,8 +332,8 @@ type SlotFile struct {
 // outputFilename must not exist.
 // Returns the opened database, the actual filename, and error.
 func OpenOutput(outputFilenameTemplate, schema string) (*sql.DB, string, error) {
-  outputFilename := strings.ReplaceAll(
-                      outputFilenameTemplate, "VERSION", fmt.Sprintf("%d", time.Now().Unix()))
+	outputFilename := strings.ReplaceAll(
+		outputFilenameTemplate, "VERSION", fmt.Sprintf("%d", time.Now().Unix()))
 
 	_ = os.Remove(outputFilename)
 	outputFile, err := os.Create(outputFilename)
@@ -349,7 +349,7 @@ func OpenOutput(outputFilenameTemplate, schema string) (*sql.DB, string, error) 
 
 	_, err = odb.Exec(schema)
 	if err != nil {
-    odb.Close()
+		odb.Close()
 		return nil, "", err
 	}
 

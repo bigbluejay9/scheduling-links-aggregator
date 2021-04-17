@@ -59,3 +59,8 @@ build-iPhoneSimulator/
 *.swp
 *.swo
 
+# Output files
+*.db
+
+crawler/crawler
+parser/parser

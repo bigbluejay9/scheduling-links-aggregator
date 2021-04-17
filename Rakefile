@@ -8,17 +8,9 @@ end
 
 desc "Builds crawler and parser binaries."
 task :build do |t|
-  Dir.chdir("crawler") {
-    sh "go build"
-  }
-  Dir.chdir("parser") {
-    sh "go build"
-  }
   mkdir_p "bin"
-  mv "crawler/crawler", "bin/"
-  mv "parser/parser", "bin/"
-
-  puts "Binaries can be found in bin/"
+  sh "go build -o bin/crawler github.com/lazau/scheduling-links-aggregator/crawler"
+  sh "go build -o bin/parser github.com/lazau/scheduling-links-aggregator/parser"
 end
 
 desc "Removes built binaries and build artifacts."

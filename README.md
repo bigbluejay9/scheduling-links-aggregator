@@ -10,9 +10,9 @@ https://github.com/smart-on-fhir/smart-scheduling-links. There are two main comp
 - Crawler: given a list of Manifest URLs, specified by the `--manifest_urls` flag, the crawler will download all
   manifest files and location, schedule, and slot files specified by those manifests.
   The output is written into a SQLite database file specified by the `--output` flag. The output file's schema can be
-  found [here](crawler/crawler.go#L24).
+  found [here](crawler/crawler.go#L26).
 - Parser: given the output of the crawler, the parser parses the JSON files and writes the output to a SQLite database
-  file specified the `--output` flag. The output file's schema can be found [here](parser/parser.go#L21).
+  file specified the `--output` flag. The output file's schema can be found [here](parser/parser.go#L23).
 
 It is intended for these files to be published (e.g. via S3 or equivalent service) so that front ends can read and
 display vaccination data to end users. For frontend clients that prefer raw JSON, the output of the crawler is

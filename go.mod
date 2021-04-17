@@ -1,4 +1,4 @@
-module github.com/lazau/scheduling-links-aggregator/crawler
+module github.com/lazau/scheduling-links-aggregator
 
 go 1.16
 

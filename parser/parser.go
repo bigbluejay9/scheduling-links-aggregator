@@ -518,13 +518,13 @@ func (s *SlotFileExtension) Write(db *sql.DB, slotId int64) error {
 func (s *SlotFile) Write(db *sql.DB) error {
 	start, err := time.Parse(ISO8601TimeFormat, s.Start)
 	if err != nil {
-		log.Print("Ignoring bad ISO8601 timestamp in SlotFile.Start: %#v", s)
+		log.Printf("Ignoring bad ISO8601 timestamp in SlotFile.Start: %#v", s)
 		start = time.Time{}
 	}
 
 	end, err := time.Parse(ISO8601TimeFormat, s.End)
 	if err != nil {
-		log.Print("Ignoring bad ISO8601 timestamp in SlotFile.End: %#v", s)
+		log.Printf("Ignoring bad ISO8601 timestamp in SlotFile.End: %#v", s)
 		end = time.Time{}
 	}
 
@@ -580,10 +580,13 @@ func OpenOutput(outputFilenameTemplate, schema string) (*sql.DB, string, error) 
 	return odb, outputFilename, nil
 }
 
-// ParseAndWriteLocations parses all rows in the locations table of input and writes
-// to the locations table of output.
-func ParseAndWriteLocations(input, output *sql.DB) error {
-	rows, err := input.Query("SELECT url, contents FROM locations")
+// ReadFileHandleLine executes query on input. The query must select
+// two string columns. The second string column is then split by '\n' and
+// passed into handle. Any errors returned by handle immediately terminates
+// the read and is returned by ReadFileHandleLine.
+func ReadFileHandleLine(input *sql.DB, query string,
+	handle func(int, []byte) error) error {
+	rows, err := input.Query(query)
 	if err != nil {
 		return err
 	}
@@ -594,74 +597,10 @@ func ParseAndWriteLocations(input, output *sql.DB) error {
 		if err := rows.Scan(&url, &contents); err != nil {
 			return err
 		}
+		log.Printf("Processing %s.", url)
 
-		log.Printf("Parsing location from %s.", url)
-		for _, c := range strings.Split(contents, "\n") {
-			var r LocationFile
-			if err := json.Unmarshal([]byte(c), &r); err != nil {
-				return err
-			}
-			if err := r.Write(output); err != nil {
-				return err
-			}
-		}
-	}
-
-	return rows.Err()
-}
-
-// ParseAndWriteSchedules parses all rows in the schedules table of input and writes
-// to the schedules table of output.
-func ParseAndWriteSchedules(input, output *sql.DB) error {
-	rows, err := input.Query("SELECT url, contents FROM schedules")
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var url, contents string
-		if err := rows.Scan(&url, &contents); err != nil {
-			return err
-		}
-
-		log.Printf("Parsing schedule from %s.", url)
-		for _, c := range strings.Split(contents, "\n") {
-			var r ScheduleFile
-			if err := json.Unmarshal([]byte(c), &r); err != nil {
-				return err
-			}
-			if err := r.Write(output); err != nil {
-				return err
-			}
-		}
-	}
-
-	return rows.Err()
-}
-
-// ParseAndWriteSlots parses all rows in the slots table of input and writes
-// to the slots table of output.
-func ParseAndWriteSlots(input, output *sql.DB) error {
-	rows, err := input.Query("SELECT url, contents FROM slots")
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var url, contents string
-		if err := rows.Scan(&contents); err != nil {
-			return err
-		}
-
-		log.Printf("Parsing slot from %s.", url)
-		for _, c := range strings.Split(contents, "\n") {
-			var r SlotFile
-			if err := json.Unmarshal([]byte(c), &r); err != nil {
-				return err
-			}
-			if err := r.Write(output); err != nil {
+		for index, c := range strings.Split(contents, "\n") {
+			if err := handle(index, []byte(c)); err != nil {
 				return err
 			}
 		}
@@ -690,6 +629,7 @@ func Run() error {
 		}
 	}
 
+  log.Printf("Opening input file %s.", inputFile)
 	crawlerOutput, err := sql.Open("sqlite3", inputFile)
 	if err != nil {
 		return err
@@ -704,20 +644,44 @@ func Run() error {
 
 	start := time.Now()
 	log.Print("Parsing locations")
-	err = ParseAndWriteLocations(crawlerOutput, odb)
-	if err != nil {
+	if err := ReadFileHandleLine(
+		crawlerOutput, "SELECT url, contents FROM locations",
+		func(lineNumber int, line []byte) error {
+			var r LocationFile
+			if err := json.Unmarshal(line, &r); err != nil {
+				log.Printf("Unable to unmarshal line %d << %s >> %s", lineNumber, string(line), err)
+				return nil
+			}
+			return r.Write(odb)
+		}); err != nil {
 		return err
 	}
 
 	log.Print("Parsing schedules")
-	err = ParseAndWriteSchedules(crawlerOutput, odb)
-	if err != nil {
+	if err := ReadFileHandleLine(
+		crawlerOutput, "SELECT url, contents FROM schedules",
+		func(lineNumber int, line []byte) error {
+			var r ScheduleFile
+			if err := json.Unmarshal(line, &r); err != nil {
+				log.Printf("Unable to unmarshal line %d: %s.", lineNumber, string(line))
+				return nil
+			}
+			return r.Write(odb)
+		}); err != nil {
 		return err
 	}
 
 	log.Print("Parsing slots")
-	err = ParseAndWriteSlots(crawlerOutput, odb)
-	if err != nil {
+	if err := ReadFileHandleLine(
+		crawlerOutput, "SELECT url, contents FROM slots",
+		func(lineNumber int, line []byte) error {
+			var r SlotFile
+			if err := json.Unmarshal(line, &r); err != nil {
+				log.Printf("Unable to unmarshal line %d: %s.", lineNumber, string(line))
+				return nil
+			}
+			return r.Write(odb)
+		}); err != nil {
 		return err
 	}
 

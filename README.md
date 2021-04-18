@@ -5,7 +5,7 @@ Binaries for aggregating Slot Publisher data specified for https://github.com/sm
 ## Overview
 
 This repository contains tools that can be used to download and parse data provided by Slot Publishers in the format of
-https://github.com/smart-on-fhir/smart-scheduling-links. There are two main components:
+https://github.com/smart-on-fhir/smart-scheduling-links.
 
 - Crawler: given a list of Manifest URLs, specified by the `--manifest_urls` flag, the crawler will download all
   manifest files and location, schedule, and slot files specified by those manifests.
@@ -13,6 +13,8 @@ https://github.com/smart-on-fhir/smart-scheduling-links. There are two main comp
   found [here](crawler/crawler.go#L26).
 - Parser: given the output of the crawler, the parser parses the JSON files and writes the output to a SQLite database
   file specified the `--output` flag. The output file's schema can be found [here](parser/parser.go#L23).
+- Validator: validates that JSON files conform to the scheduling links spec
+  https://github.com/smart-on-fhir/smart-scheduling-links/blob/master/specification.md. `./validator help` for more info.
 
 It is intended for these files to be published (e.g. via S3 or equivalent service) so that front ends can read and
 display vaccination data to end users. For frontend clients that prefer raw JSON, the output of the crawler is

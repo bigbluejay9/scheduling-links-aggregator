@@ -24,7 +24,7 @@ appropriate. For frontend clients that prefer structured data, the output of the
 
 ### Validator
 
-The validator is an executable Ruby script just run it with the argument 'help' to see details
+The validator is an executable Ruby script. Just run it with the argument 'help' to see details:
 ```sh
 $ cd validator
 $ ./validator help

@@ -22,6 +22,16 @@ appropriate. For frontend clients that prefer structured data, the output of the
 
 ## Usage
 
+### Validator
+
+The validator is an executable Ruby script just run it with the argument 'help' to see details
+```sh
+$ cd validator
+$ ./validator help
+```
+
+### Crawler and Parser
+
 Build binaries
 ```sh
 $ rake

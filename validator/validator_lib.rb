@@ -4,6 +4,7 @@
 require "date"
 require "json"
 require "uri"
+require "set"
 
 US_STATES = ["AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", "AS", "GU", "MP", "PR", "VI", "UM"]
 
@@ -73,6 +74,11 @@ module ValidatorLib
     # Id references made
     attr_accessor :location_id_refs,
       :schedule_id_refs
+    # X_id_refs are an array of hashes.
+    # {
+    #   id: "id reference"
+    #   context: Context object where the reference was made.
+    # }
 
     def initialize()
       @location_ids = []
@@ -115,7 +121,6 @@ module ValidatorLib
 
     # errors validates all ids and id references in state and returns a list of errors.
     def errors
-
       duplicate_finder = -> (name, ids) {
         ids.group_by { |i| i[:id] }.
         reject { |k, v| v.length == 1 }.
@@ -124,11 +129,12 @@ module ValidatorLib
         end
       }
 
-      # Bad reference finder.
       invalid_ref_finder = -> (name, ids, refs) {
-        i = ids.map { |i| i[:id] }.uniq.sort
-        # XXX
-        refs
+        ids = Set.new(ids.map { |i| i[:id] })
+
+        refs.reject { |r| ids.include?(r[:id]) }.map do |r|
+          "Unknown #{name} id '#{r[:id]}' referenced by #{r[:context]}"
+        end
       }
 
       errors = []
@@ -136,8 +142,10 @@ module ValidatorLib
       errors.concat(duplicate_finder.call("Schedule", @schedule_ids))
       errors.concat(duplicate_finder.call("Slot", @slot_ids))
 
-      # XXX
+      errors.concat(duplicate_finder.call("location", @location_id_refs))
+      errors.concat(duplicate_finder.call("schedule", @schedule_id_refs))
 
+      errors
     end
   end
 
@@ -171,11 +179,11 @@ module ValidatorLib
     begin
       parsed = JSON.parse(manifest_contents)
     rescue JSON::ParserError => e
-      return {}
+      return []
     end
 
     parsed["output"]&.map do |obj|
-      unless obj&.is_a? Hash and obj.hash_key?("type") and obj.has_key?("url")
+      unless obj&.is_a? Hash and obj.has_key?("type") and obj.has_key?("url")
         next nil
       end
       next nil unless ["Location", "Schedule", "Slot"].include? obj["type"]
@@ -283,56 +291,58 @@ module ValidatorLib
   # Validates location file with the given filename and contents.
   # Returns an array of validation errors.
   def validate_location(state, filename, contents)
-    errors = []
-    parsed = {}
-    begin
-      parsed = JSON.parse(contents)
-    rescue JSON::ParserError => e
-      return ["Failed to parse location #{filename}: #{e}"]
+    errors = contents.split("\n").each_with_index.flat_map do |co, idx|
+      errors = []
+      parsed = {}
+      begin
+        parsed = JSON.parse(co)
+      rescue JSON::ParserError => e
+        next ["Failed to parse location #{filename}: #{e}"]
+      end
+
+      context = Context.new("Location", filename, [], idx + 1)
+
+      validate_json_object(
+        context, state, parsed,
+        required_fields: ["resourceType", "id", "name", "telecom", "address", "position", "identifier"],
+        field_types: [
+          { name: "resourceType", type: String },
+          { name: "id", type: String },
+          { name: "name", type: String },
+          { name: "telecom", type: Array },
+          { name: "address", type: Hash },
+          { name: "description", type: String },
+          { name: "position", type: Hash },
+          { name: "identifier", type: Array },
+        ],
+        field_contents: [
+          {
+            name: "resourceType",
+            validator: -> (ctx, state, c) { one_of_strings_validator(ctx, c, ["Location"]) },
+          },
+          {
+            name: "id",
+            validator: -> (ctx, state, c) { id_validator(ctx, state, "location_id", c) },
+          },
+          {
+            name: "telecom",
+            validator: -> (ctx, state, c) { validate_location_telecom(ctx, state, c) },
+          },
+          {
+            name: "address",
+            validator: -> (ctx, state, c) { validate_location_address(ctx, state, c) },
+          },
+          {
+            name: "position",
+            validator: -> (ctx, state, c) { validate_location_position(ctx, state, c) },
+          },
+          {
+            name: "identifier",
+            validator: -> (ctx, state, c) { validate_location_identifier(ctx, state, c) },
+          },
+        ],
+        object_validator: nil)
     end
-
-    context = Context.new("Location", filename, [])
-
-    validate_json_object(
-      context, state, parsed,
-      required_fields: ["resourceType", "id", "name", "telecom", "address", "position", "identifier"],
-      field_types: [
-        { name: "resourceType", type: String },
-        { name: "id", type: String },
-        { name: "name", type: String },
-        { name: "telecom", type: Array },
-        { name: "address", type: Hash },
-        { name: "description", type: String },
-        { name: "position", type: Hash },
-        { name: "identifier", type: Array },
-      ],
-      field_contents: [
-        {
-          name: "resourceType",
-          validator: -> (ctx, state, c) { one_of_strings_validator(ctx, c, ["Location"]) },
-        },
-        {
-          name: "id",
-          validator: -> (ctx, state, c) { id_validator(ctx, state, "location_id", c) },
-        },
-        {
-          name: "telecom",
-          validator: -> (ctx, state, c) { validate_location_telecom(ctx, state, c) },
-        },
-        {
-          name: "address",
-          validator: -> (ctx, state, c) { validate_location_address(ctx, state, c) },
-        },
-        {
-          name: "position",
-          validator: -> (ctx, state, c) { validate_location_position(ctx, state, c) },
-        },
-        {
-          name: "identifier",
-          validator: -> (ctx, state, c) { validate_location_identifier(ctx, state, c) },
-        },
-      ],
-      object_validator: nil)
   end
 
   def validate_location_telecom(context, state, json_obj)
@@ -377,9 +387,12 @@ module ValidatorLib
         {
           name: "line",
           validator: -> (ctx, state, c) {
+            return [] unless c.is_a? Array
             c.each_with_index.flat_map do |s, idx|
-              unless s.is_a? String
-                o << "#{ctx.with_field(idx)}: not a string. Got '#{s}'"
+              if s.is_a? String
+                []
+              else
+                ["#{ctx.with_field(idx)}: not a string. Got '#{s}'"]
               end
             end
           },
@@ -415,53 +428,55 @@ module ValidatorLib
   # Validates schedule file with the given filename and contents.
   # Returns an array of validation errors.
   def validate_schedule(state, filename, contents)
-    errors = []
-    parsed = {}
-    begin
-      parsed = JSON.parse(contents)
-    rescue JSON::ParserError => e
-      return ["Failed to parse schedule #{filename}: #{e}"]
+    contents.split("\n").each_with_index.flat_map do |co, idx|
+      errors = []
+      parsed = {}
+      begin
+        parsed = JSON.parse(co)
+      rescue JSON::ParserError => e
+        return ["Failed to parse schedule #{filename}: #{e}"]
+      end
+
+      context = Context.new("Schedule", filename, [], idx + 1)
+
+      validate_json_object(
+        context, state, parsed,
+        required_fields: ["resourceType", "id", "actor", "serviceType"],
+        field_types: [
+          { name: "resourceType", type: String },
+          { name: "id", type: String },
+          { name: "actor", type: Array },
+          { name: "serviceType", type: Array },
+          { name: "extension", type: Array },
+        ],
+        field_contents: [
+          {
+            name: "resourceType",
+            validator: -> (ctx, state, c) { one_of_strings_validator(ctx, c, ["Schedule"]) },
+          },
+          {
+            name: "id",
+            validator: -> (ctx, state, c) { id_validator(ctx, state, "schedule_id", c) },
+          },
+          {
+            name: "actor",
+            validator: -> (ctx, state, c) { validate_schedule_actor(ctx, state, c) },
+          },
+          {
+            name: "serviceType",
+            validator: -> (ctx, state, c) { validate_schedule_service_type(ctx, state, c) },
+          },
+          {
+            name: "extension",
+            validator: -> (ctx, state, c) { validate_schedule_extension(ctx, state, c) },
+          },
+        ],
+        object_validator: nil)
     end
-
-    context = Context.new("Schedule", filename, [])
-
-    validate_json_object(
-      context, state, parsed,
-      required_fields: ["resourceType", "id", "actor", "serviceType"],
-      field_types: [
-        { name: "resourceType", type: String },
-        { name: "id", type: String },
-        { name: "actor", type: Array },
-        { name: "serviceType", type: Array },
-        { name: "extension", type: Array },
-      ],
-      field_contents: [
-        {
-          name: "resourceType",
-          validator: -> (ctx, state, c) { one_of_strings_validator(ctx, c, ["Schedule"]) },
-        },
-        {
-          name: "id",
-          validator: -> (ctx, state, c) { id_validator(ctx, state, "schedule_id", c) },
-        },
-        {
-          name: "actor",
-          validator: -> (ctx, state, c) { validate_schedule_actor(ctx, state, c) },
-        },
-        {
-          name: "serviceType",
-          validator: -> (ctx, state, c) { validate_schedule_service_type(ctx, state, c) },
-        },
-        {
-          name: "extension",
-          validator: -> (ctx, state, c) { validate_schedule_extension(ctx, state, c) },
-        },
-      ],
-      object_validator: nil)
   end
 
-  def validate_schedule_actor(context, state, c)
-    return ["#{context}: actor must have only one JSON object. Got #{c.length} objects."] unless c.length == 1
+  def validate_schedule_actor(context, state, json_obj)
+    return ["#{context}: actor must have only one JSON object. Got #{json_obj.length} objects."] unless json_obj.length == 1
     validate_json_array(
       context, state, json_obj,
       required_fields: ["reference"],
@@ -469,19 +484,243 @@ module ValidatorLib
       field_contents: [
         {
           name: "reference",
-          validator: -> (ctx, state, c) { state.add_id_ref(ctx, "location_id", c["reference"]) },
+          validator: -> (ctx, state, c) { id_ref_validator(ctx, state, "location_id", c) },
         },
       ],
       object_validator: nil)
   end
 
-  # XXX
-  def validate_schedule_service_type(context, state, c)
+  def validate_schedule_service_type(context, state, json_obj)
+    validate_json_array(
+      context, state, json_obj,
+      required_fields: ["coding"],
+      field_types: [
+        {name: "coding", type: Array},
+      ],
+      field_contents: [
+        {
+          name: "coding",
+          validator: -> (ctx, state, c) { validate_schedule_service_type_coding(ctx, state, c) },
+        },
+      ],
+      object_validator: nil)
   end
 
-  def validate_schedule_extension(context, state, c)
+  def validate_schedule_service_type_coding(context, state, json_obj)
+    errors = validate_json_array(
+      context, state, json_obj,
+      required_fields: ["system", "code", "display"],
+      field_types: [
+        {name: "system", type: String},
+        {name: "code", type: String},
+        {name: "display", type: String},
+      ],
+      field_contents: [],
+      object_validator: nil)
+
+    return errors unless json_obj.is_a? Array
+
+    # Should these be considered a validation error?
+    unless json_obj.find do |obj|
+        (obj["system"] == "http://terminology.hl7.org/CodeSystem/service-type") and
+          (obj["code"] == "57") and
+          (obj["display"] == "Immunization")
+      end
+      errors << %Q(#{context}: Schedule file must have serviceType with JSON object '{ "system": "http://terminology.hl7.org/CodeSystem/service-type", "code": "57", "display": "Immunization" }')
+    end
+
+    # Should this be considered a validation error?
+    unless json_obj.find do |obj|
+        (obj["system"] == "http://fhir-registry.smarthealthit.org/CodeSystem/service-type") and
+          (obj["code"] == "covid19-immunization") and
+          (obj["display"] == "COVID-19 Immunization Appointment")
+      end
+      errors << %Q(#{context}: Schedule file must have serviceType with JSON object '{ "system": "http://fhir-registry.smarthealthit.org/CodeSystem/service-type", "code": "covid19-immunization", "display": "COVID-19 Immunization Appointment" }')
+    end
+
+    errors
   end
 
+  def validate_schedule_extension(context, state, json_obj)
+    validate_json_array(
+      context, state, json_obj,
+      required_fields: ["url"],
+      field_types: [
+        {name: "url", type: String},
+        {name: "valueInteger", type: Numeric},
+      ],
+      field_contents: [
+        {
+          name: "url",
+          validator: -> (ctx, state, c) {
+            one_of_strings_validator(
+              ctx, c,
+              [
+                "http://fhir-registry.smarthealthit.org/StructureDefinition/vaccine-product",
+                "http://fhir-registry.smarthealthit.org/StructureDefinition/vaccine-dose",
+              ]
+            )
+          }
+        },
+      ],
+      object_validator: -> (ctx, state, c) {
+        errors = []
+
+        if c["url"] == "http://fhir-registry.smarthealthit.org/StructureDefinition/vaccine-product"
+          u = "http://fhir-registry.smarthealthit.org/StructureDefinition/vaccine-product"
+          validate_json_object(
+            ctx.with_field("valueCoding"), state, c["valueCoding"],
+            required_fields: ["system", "code", "display"],
+            field_types: [
+              {name: "system", type: String},
+              {name: "code", type: String},
+              {name: "display", type: String},
+            ],
+            field_contents: [
+              {
+                name: "system",
+                validator: -> (ctx, state, c) { one_of_strings_validator(ctx, c, ["http://hl7.org/fhir/sid/cvx"]) },
+              },
+              {
+                name: "code",
+                validator: -> (ctx, state, c) { one_of_strings_validator(ctx, c, ["207", "208", "210", "212"]) },
+              },
+            ],
+            object_validator: nil
+          )
+        elsif c["url"] == "http://fhir-registry.smarthealthit.org/StructureDefinition/vaccine-dose"
+          unless c["valueInteger"].is_a? Numeric
+            errors << "#{ctx}: extension with url 'http://fhir-registry.smarthealthit.org/StructureDefinition/vaccine-dose' must have an associated number valueInteger field"
+          end
+        end
+        errors
+      })
+  end
+
+  # Validates slot file with the given filename and contents.
+  # Returns an array of validation errors.
+  def validate_slot(state, filename, contents)
+    contents.split("\n").each_with_index.flat_map do |co, idx|
+      errors = []
+      parsed = {}
+      begin
+        parsed = JSON.parse(co)
+      rescue JSON::ParserError => e
+        return ["Failed to parse slot #{filename}: #{e}"]
+      end
+
+      context = Context.new("Slot", filename, [], idx + 1)
+
+      validate_json_object(
+        context, state, parsed,
+        required_fields: ["resourceType", "id", "schedule", "status", "start", "end"],
+        field_types: [
+          { name: "resourceType", type: String },
+          { name: "id", type: String },
+          { name: "schedule", type: Hash },
+          { name: "status", type: String },
+          { name: "start", type: String },
+          { name: "end", type: String },
+          { name: "extension", type: Array },
+        ],
+        field_contents: [
+          {
+            name: "resourceType",
+            validator: -> (ctx, state, c) { one_of_strings_validator(ctx, c, ["Slot"]) },
+          },
+          {
+            name: "id",
+            validator: -> (ctx, state, c) { id_validator(ctx, state, "slot_id", c) },
+          },
+          {
+            name: "schedule",
+            validator: -> (ctx, state, c) { validate_slot_schedule(ctx, state, c) },
+          },
+          {
+            name: "status",
+            validator: -> (ctx, state, c) { one_of_strings_validator(ctx, c, ["free", "busy"]) },
+          },
+          {
+            name: "start",
+            validator: -> (ctx, state, c) { iso8601_validator(ctx, c) },
+          },
+          {
+            name: "end",
+            validator: -> (ctx, state, c) { iso8601_validator(ctx, c) },
+          },
+          {
+            name: "extension",
+            validator: -> (ctx, state, c) { validate_slot_extension(ctx, state, c) },
+          },
+        ],
+        object_validator: nil)
+    end
+  end
+
+  def validate_slot_schedule(context, state, json_obj)
+    validate_json_object(
+      context, state, json_obj,
+      required_fields: ["reference"],
+      field_types: [{name: "reference", type: String}],
+      field_contents: [
+        {
+          name: "reference",
+          validator: -> (ctx, state, c) { id_ref_validator(ctx, state, "schedule_id", c) },
+        },
+      ],
+      object_validator: nil)
+  end
+
+  def validate_slot_extension(context, state, json_obj)
+    validate_json_array(
+      context, state, json_obj,
+      required_fields: ["url"],
+      field_types: [
+        {name: "url", type: String},
+        {name: "valueUrl", type: String},
+        {name: "valueString", type: String},
+        {name: "valueInteger", type: Numeric},
+      ],
+      field_contents: [
+        {
+          name: "url",
+          validator: -> (ctx, state, c) {
+            one_of_strings_validator(
+              ctx, c, [
+                "http://fhir-registry.smarthealthit.org/StructureDefinition/booking-deep-link",
+                "http://fhir-registry.smarthealthit.org/StructureDefinition/booking-phone",
+                "http://fhir-registry.smarthealthit.org/StructureDefinition/slot-capacity",
+              ]
+            )
+          },
+        },
+        {
+          name: "valueUrl",
+          validator: -> (ctx, state, c) { url_validator(ctx, c) },
+        },
+        {
+          name: "valueString",
+          validator: -> (ctx, state, c) { phone_validator(ctx, c) },
+        },
+      ],
+      object_validator: -> (ctx, state, c) {
+        case c["url"]
+        when "http://fhir-registry.smarthealthit.org/StructureDefinition/booking-deep-link"
+          if c["valueUrl"].nil?
+            return ["#{context}: extension type 'http://fhir-registry.smarthealthit.org/StructureDefinition/booking-deep-link' must have an associated valueUrl specified"]
+          end
+        when "http://fhir-registry.smarthealthit.org/StructureDefinition/booking-phone"
+          if c["valueString"].nil?
+            return ["#{context}: extension type 'http://fhir-registry.smarthealthit.org/StructureDefinition/booking-phone' must have an associated valueString specified"]
+          end
+        when "http://fhir-registry.smarthealthit.org/StructureDefinition/slot-capacity"
+          if c["valueInteger"].nil?
+            return ["#{context}: extension type 'http://fhir-registry.smarthealthit.org/StructureDefinition/slot-capacity' must have an associated valueInteger specified"]
+          end
+        end
+        []
+      })
+  end
  private
   # Validates that json_obj has fields.
   # Returns an array of validation errors.
@@ -538,6 +777,7 @@ module ValidatorLib
 
   # Validates that c is an array of JSON objects. Each object is then 
   # passed to validate_json_object. See validate_json_object for arugment descriptions.
+  # object_validator is applied to each object in the array.
   #
   # All validators are skipped if c is not an Array.
   #
@@ -622,5 +862,29 @@ module ValidatorLib
     end
 
     state.add_id(context, id_type, c)
+    []
+  end
+
+  def id_ref_validator(context, state, id_reference_type, c)
+    case id_reference_type
+    when "location_id"
+      md = c.match(/Location\/(.)+/)
+      if md.nil?
+        return ["#{context}: location id reference does not have the form 'Location/' + id"]
+      else
+        state.add_id_ref(context, "location_id", md[1])
+        return []
+      end
+    when "schedule_id"
+      md = c.match(/Schedule\/(.)+/)
+      if md.nil?
+        return ["#{context}: schedule id reference does not have the form 'Schedule/' + id"]
+      else
+        state.add_id_ref(context, "schedule_id", md[1])
+        return []
+      end
+    else
+      raise "Unknown id reference type: #{id_reference_type}"
+    end
   end
 end

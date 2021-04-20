@@ -2,6 +2,7 @@
 
 require "thor"
 require "uri"
+require "rest-client"
 
 require_relative "validator_lib"
 
@@ -29,9 +30,24 @@ class ValidatorCLI < Thor
     You may pass in a path or a URL to validate.
   DESC
   def all(file_or_url)
-    puts "Validating #{file_or_url}"
+    puts "Validating #{file_or_url} and all referenced resources"
     state = State.new
     errors = validate_manifest_helper(state, file_or_url)
+
+    resources = manifest_resources(read_resource(file_or_url))
+    resources.each_with_index do |res, idx|
+      puts "Validating [%5d/%5d]: #{res[:type]} file #{res[:url]}" % [idx+1, resources.length]
+      case res[:type]
+      when "Location"
+        errors.concat validate_location(state, res[:url], read_resource(res[:url]))
+      when "Schedule"
+        errors.concat validate_schedule(state, res[:url], read_resource(res[:url]))
+      when "Slot"
+        errors.concat validate_slot(state, res[:url], read_resource(res[:url]))
+      else
+        raise Thor::Error, "Unknown manifest resource type #{res[:type]}"
+      end
+    end
     print_errors(errors)
   end
 
@@ -45,7 +61,7 @@ class ValidatorCLI < Thor
     file are not validated. To validate all named resources, use the 'all' command.
   DESC
   def manifest(file_or_url)
-    puts "Validating #{file_or_url}"
+    puts "Validating manifest #{file_or_url}"
 
     state = State.new
     print_errors(validate_manifest_helper(state, file_or_url))
@@ -53,17 +69,29 @@ class ValidatorCLI < Thor
 
   desc "location LOCATION_FILE_OR_URL", "Validates location LOCATION_FILE_OR_URL."
   def location(file_or_url)
-    puts "Validating #{file_or_url}"
+    puts "Validating location #{file_or_url}"
+    errors = []
+    state = State.new
+    errors.concat(validate_location(state, file_or_url, read_resource(file_or_url)))
+    errors.concat(state.errors())
   end
 
   desc "schedule SCHEDULE_FILE_OR_URL", "Validates schedule SCHEDULE_FILE_OR_URL."
   def schedule(file_or_url)
-    puts "Validating #{file_or_url}"
+    puts "Validating schedule #{file_or_url}"
+    errors = []
+    state = State.new
+    errors.concat(validate_schedule(state, file_or_url, read_resource(file_or_url)))
+    errors.concat(state.errors())
   end
 
   desc "slot SLOT_FILE_OR_URL", "Validates location SLOT_FILE_OR_URL."
   def slot(file_or_url)
-    puts "Validating #{file_or_url}"
+    puts "Validating slot #{file_or_url}"
+    errors = []
+    state = State.new
+    errors.concat(validate_slot(state, file_or_url, read_resource(file_or_url)))
+    errors.concat(state.errors())
   end
 
  private
@@ -73,8 +101,7 @@ class ValidatorCLI < Thor
     errors = []
     errors.concat(validate_manifest_url_path(f))
 
-    contents = read_resource(f, errors)
-    errors.concat(contents.nil? ? [] : validate_manifest(state, f, contents))
+    errors.concat(validate_manifest(state, f, read_resource(f)))
     errors.concat(state.errors())
   end
 
@@ -89,32 +116,28 @@ class ValidatorCLI < Thor
   end
 
   # Attempts to get the contents of loc, which may be a URL or file path.
-  # If the read fails, returns nil and adds an error message to errors.
+  # If the read fails, raises an error.
   # Returns a string containing the contents of the URL or file.
-  def read_resource(loc, errors)
+  def read_resource(loc)
     if is_url(loc)
       url = URI.parse(loc)
-      req.add_field("User-Agent", "github.com/lazau/scheduling-links-aggregator/validator")
       resp_body = ""
-      Net::HTTP.start(url.host, url.port) do |h|
-        req = Net::HTTP::Get.new(url)
-        resp = h.request(req)
-
-        if resp.code != "200"
-          errors << "Unable to read #{loc} (HTTP status code #{resp.code})."
-          raise Thor::Error, "Unable to fetch #{loc}: HTTP response code #{resp.code}"
-        end
-        resp_body = resp.body
+      if options[:host] != nil
+        uri.host, uri.port = options[:host].split(":")
+        uri.scheme = "http"
       end
-      resp_body
+
+      resp = RestClient.get(url.to_s, headers: {"User-Agent" => "github.com/lazau/scheduling-links-aggregator/validator"})
+      if resp.code != 200
+        raise Thor::Error, "Unable to fetch #{loc}: HTTP response code #{resp.code}"
+      end
+      return resp.body
     end
 
     if !File.exist?(loc)
-      errors << "File #{loc} does not exist."
-      return nil
-    else 
-      return File.read(loc)
+      raise Thor::Error, "File #{loc} does not exist."
     end
+    return File.read(loc)
   end
 end
 

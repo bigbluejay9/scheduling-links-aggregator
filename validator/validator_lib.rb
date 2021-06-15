@@ -346,6 +346,10 @@ module ValidatorLib
   end
 
   def validate_location_telecom(context, state, json_obj)
+    if json_obj.is_a?(Array) and json_obj.length == 0
+      return ["#{context}: telcom field must have at least one JSON object. Got #{json_obj.length} objects."]
+    end
+
     validate_json_array(
       context, state, json_obj,
       required_fields: ["system", "value"],

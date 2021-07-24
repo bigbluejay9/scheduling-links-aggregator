@@ -304,7 +304,7 @@ module ValidatorLib
 
       validate_json_object(
         context, state, parsed,
-        required_fields: ["resourceType", "id", "name", "telecom", "address", "position", "identifier"],
+        required_fields: ["resourceType", "id", "name", "telecom", "address", "identifier"],
         field_types: [
           { name: "resourceType", type: String },
           { name: "id", type: String },
@@ -558,6 +558,7 @@ module ValidatorLib
               [
                 "http://fhir-registry.smarthealthit.org/StructureDefinition/vaccine-product",
                 "http://fhir-registry.smarthealthit.org/StructureDefinition/vaccine-dose",
+                "http://fhir-registry.smarthealthit.org/StructureDefinition/has-availability",
               ]
             )
           }
@@ -591,6 +592,10 @@ module ValidatorLib
         elsif c["url"] == "http://fhir-registry.smarthealthit.org/StructureDefinition/vaccine-dose"
           unless c["valueInteger"].is_a? Numeric
             errors << "#{ctx}: extension with url 'http://fhir-registry.smarthealthit.org/StructureDefinition/vaccine-dose' must have an associated number valueInteger field"
+          end
+        elsif c["url"] == "http://fhir-registry.smarthealthit.org/StructureDefinition/has-availability"
+          unless ["some", "none", "unknown"].include? c["valueCode"]
+            errors << "#{ctx}: extension with url 'http://fhir-registry.smarthealthit.org/StructureDefinition/has-availability' must have one of 'some', 'none', 'unknown' valueCode"
           end
         end
         errors
